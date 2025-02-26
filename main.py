@@ -2,7 +2,7 @@ import asyncio
 import logging
 import os
 
-from aiogram import Bot, Dispatcher, types
+from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
@@ -62,10 +62,13 @@ async def cmd_cancel(message: Message, state: FSMContext):
 
 @dp.message(Form.waiting_for_fio)
 async def process_fio(message: Message, state: FSMContext):
-    fio = message.text
-    await state.update_data(fio=fio)
-    await message.answer(f"Спасибо, я записал ФИО! ✍️ \nТеперь отправь видео 📹. \nЕсли передумаешь, отправь /cancel.")
-    await state.set_state(Form.waiting_for_video)
+    if message.text:
+        fio = message.text.strip().title()
+        await state.update_data(fio=fio)
+        await message.answer(f"Спасибо, я записал ФИО! ✍️ \nТеперь отправь видео 📹. \nЕсли передумаешь, отправь /cancel.")
+        await state.set_state(Form.waiting_for_video)
+    else:
+        await message.answer("⚠️ Пожалуйста, отправьте ФИО. ⚠️ \nЕсли передумали, отправьте /cancel.")
 
 
 @dp.message(Form.waiting_for_video)
@@ -104,8 +107,9 @@ async def handle_any(message: Message):
 
 async def main():
     logger.info("Bot started!")
+    await bot.delete_webhook(drop_pending_updates=True)
     await bot.set_my_commands(commands)
-    await dp.start_polling(bot)
+    await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
 
 
 if __name__ == "__main__":
