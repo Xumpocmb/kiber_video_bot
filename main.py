@@ -1,5 +1,9 @@
 import asyncio
-import logging
+
+from aiogram.utils.keyboard import InlineKeyboardBuilder
+
+from db import cursor, conn
+from logger import logger
 import os
 
 from aiogram import Bot, Dispatcher, types, F
@@ -10,15 +14,7 @@ from aiogram.types import BotCommand
 from aiogram.types import Message
 from dotenv import load_dotenv
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(name)s - %(levelname)s - %(message)s",
-    handlers=[
-        logging.FileHandler("bot.log"),
-        logging.StreamHandler(),
-    ],
-)
-logger = logging.getLogger(__name__)
+
 
 load_dotenv()
 BOT_TOKEN = os.getenv("BOT_TOKEN")
@@ -32,6 +28,8 @@ dp = Dispatcher()
 commands = [
     BotCommand(command="start", description="Начать работу с ботом"),
     BotCommand(command="cancel", description="Отменить текущее действие"),
+    BotCommand(command="vote", description="Проголосовать за видео"),
+    BotCommand(command="results", description="Посмотреть результаты голосования"),
 ]
 
 
@@ -75,14 +73,19 @@ async def process_fio(message: Message, state: FSMContext):
 async def process_video(message: Message, state: FSMContext):
     if message.video:
         data = await state.get_data()
-        fio = data.get("fio", "unknown")
+        fio = data.get("fio", "unknown").strip().capitalize().replace(" ", "_")
 
+        video_file_id = message.video.file_id
         video_file = await bot.get_file(message.video.file_id)
         video_path = f"videos/{fio}.mp4"
 
         os.makedirs("videos", exist_ok=True)
 
         await bot.download_file(video_file.file_path, video_path)
+
+        cursor.execute("INSERT INTO participants (user_id, fio, video_filename, video_file_id, has_voted) VALUES (?, ?, ?)",
+                       (message.from_user.id, fio, video_path, video_file_id, False))
+        conn.commit()
         await message.answer("👏 Отлично! 💾 Видео успешно сохранено!")
         logger.info(f"Video saved: {video_path}")
 
@@ -91,10 +94,65 @@ async def process_video(message: Message, state: FSMContext):
         await message.answer("⚠️ Пожалуйста, отправьте видео. ⚠️ \nЕсли передумали, отправьте /cancel.")
 
 
-@dp.errors()
-async def errors_handler(update: types.Update, exception: Exception):
-    logger.error(f"Error in update {update}: {exception}", exc_info=True)
-    return True
+@dp.message(Command("vote"))
+async def vote(message: Message):
+    cursor.execute("SELECT id, user_id, fio, video_file_id, has_voted FROM participants")
+    participants = cursor.fetchall()
+    if not participants:
+        await message.answer("Нет доступных видео для голосования.")
+        return
+
+
+
+    keyboard = InlineKeyboardBuilder()
+    for participant_id, fio, video_file_id in participants:
+        keyboard.button(text="Голосовать", callback_data=f"vote_{participant_id}")
+        await message.answer_video(video_file_id, caption=f"Видео участника: {fio}", reply_markup=keyboard.as_markup())
+
+    await message.answer("Выберите видео, за которое хотите проголосовать:", reply_markup=keyboard.as_markup())
+
+@dp.callback_query(F.data.startswith("vote_"))
+async def process_vote(callback_query: types.CallbackQuery):
+    user_id = callback_query.from_user.id  # Получаем ID пользователя
+    participant_id = int(callback_query.data.split("_")[1])
+
+    # Проверяем, зарегистрирован ли пользователь
+    cursor.execute("SELECT user_id, has_voted FROM participants WHERE id = ?", (participant_id,))
+    participant = cursor.fetchone()
+
+    if participant is None:
+        await callback_query.answer("Этот участник не найден.")
+        return
+
+    if participant[0] != user_id:  # Если user_id пользователя не совпадает с user_id участника
+        await callback_query.answer("Вы не можете голосовать за этого участника.")
+        return
+
+    if participant[1]:  # Если has_voted == True
+        await callback_query.answer("Вы уже проголосовали за это видео.")
+        return
+
+    # Обновляем поле has_voted и увеличиваем количество голосов
+    cursor.execute("UPDATE participants SET likes = likes + 1, has_voted = TRUE WHERE id = ?", (participant_id,))
+    conn.commit()
+    await callback_query.answer("Ваш голос учтен! Спасибо за участие.")
+
+
+@dp.message(Command("results"))
+async def show_results(message: Message):
+    cursor.execute("SELECT fio, likes FROM participants ORDER BY likes DESC")
+    results = cursor.fetchall()
+    if not results:
+        await message.answer("Пока нет голосов.")
+        return
+
+    results_text = "Результаты голосования:\n" + "\n".join(f"{fio}: {likes} голосов" for fio, likes in results)
+    await message.answer(results_text)
+
+# @dp.errors()
+# async def errors_handler(update: types.Update, exception: Exception):
+#     logger.error(f"Error in update {update}: {exception}", exc_info=True)
+#     return True
 
 
 @dp.message()
